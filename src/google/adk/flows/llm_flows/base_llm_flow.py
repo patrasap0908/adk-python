@@ -36,8 +36,6 @@ from ...agents.invocation_context import InvocationContext
 from ...agents.live_request_queue import LiveRequestQueue
 from ...agents.readonly_context import ReadonlyContext
 from ...agents.run_config import StreamingMode
-from ...auth.auth_handler import AuthHandler
-from ...auth.auth_tool import AuthConfig
 from ...auth.credential_manager import CredentialManager
 from ...events.event import Event
 from ...models.base_llm_connection import BaseLlmConnection
@@ -51,10 +49,6 @@ from ...tools.base_toolset import BaseToolset
 from ...tools.tool_context import ToolContext
 from ...utils.context_utils import Aclosing
 from .audio_cache_manager import AudioCacheManager
-from .functions import build_auth_request_event
-
-# Prefix used by toolset auth credential IDs
-TOOLSET_AUTH_CREDENTIAL_ID_PREFIX = '_adk_toolset_auth_'
 
 if TYPE_CHECKING:
   from ...agents.llm_agent import LlmAgent
@@ -115,24 +109,24 @@ def _finalize_model_response_event(
 async def _resolve_toolset_auth(
     invocation_context: InvocationContext,
     agent: LlmAgent,
-) -> AsyncGenerator[Event, None]:
+) -> None:
   """Resolves authentication for toolsets before tool listing.
 
   For each toolset with auth configured via get_auth_config():
   - If credential is available, populate auth_config.exchanged_auth_credential
-  - If credential is not available, yield auth request event and interrupt
+  - If credential is not available, log and continue — auth will be handled
+    on demand by ToolAuthHandler when a tool is actually invoked.
+
+  This avoids triggering OAuth redirects on every agent invocation,
+  including messages that don't require any tool calls.
 
   Args:
     invocation_context: The invocation context.
     agent: The LLM agent.
-
-  Yields:
-    Auth request events if any toolset needs authentication.
   """
   if not agent.tools:
     return
 
-  pending_auth_requests: dict[str, AuthConfig] = {}
   callback_context = CallbackContext(invocation_context)
 
   for tool_union in agent.tools:
@@ -161,30 +155,11 @@ async def _resolve_toolset_auth(
       # Populate in-place for toolset to use in get_tools()
       auth_config.exchanged_auth_credential = credential
     else:
-      # Need auth - will interrupt
-      toolset_id = (
-          f'{TOOLSET_AUTH_CREDENTIAL_ID_PREFIX}{type(tool_union).__name__}'
+      logger.debug(
+          'No credential found for toolset %s; deferring auth to tool'
+          ' invocation.',
+          type(tool_union).__name__,
       )
-      pending_auth_requests[toolset_id] = auth_config
-
-  if not pending_auth_requests:
-    return
-
-  # Build auth requests dict with generated auth requests
-  auth_requests = {
-      credential_id: AuthHandler(auth_config).generate_auth_request()
-      for credential_id, auth_config in pending_auth_requests.items()
-  }
-
-  # Yield event with auth requests using the shared helper
-  yield build_auth_request_event(
-      invocation_context,
-      auth_requests,
-      author=agent.name,
-  )
-
-  # Interrupt invocation
-  invocation_context.end_invocation = True
 
 
 async def _handle_before_model_callback(
@@ -916,14 +891,7 @@ class BaseLlmFlow(ABC):
 
     # Resolve toolset authentication before tool listing.
     # This ensures credentials are ready before get_tools() is called.
-    async with Aclosing(
-        self._resolve_toolset_auth(invocation_context, agent)
-    ) as agen:
-      async for event in agen:
-        yield event
-
-    if invocation_context.end_invocation:
-      return
+    await _resolve_toolset_auth(invocation_context, agent)
 
     # Run processors for tools.
     await _process_agent_tools(invocation_context, llm_request)
@@ -1272,17 +1240,6 @@ class BaseLlmFlow(ABC):
     return _finalize_model_response_event(
         llm_request, llm_response, model_response_event
     )
-
-  async def _resolve_toolset_auth(
-      self,
-      invocation_context: InvocationContext,
-      agent: LlmAgent,
-  ) -> AsyncGenerator[Event, None]:
-    async with Aclosing(
-        _resolve_toolset_auth(invocation_context, agent)
-    ) as agen:
-      async for event in agen:
-        yield event
 
   async def _handle_before_model_callback(
       self,
