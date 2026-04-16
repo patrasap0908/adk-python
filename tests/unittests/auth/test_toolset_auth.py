@@ -16,7 +16,6 @@
 
 from typing import Optional
 from unittest.mock import AsyncMock
-from unittest.mock import MagicMock
 from unittest.mock import Mock
 from unittest.mock import patch
 
@@ -28,12 +27,8 @@ from google.adk.agents.invocation_context import InvocationContext
 from google.adk.auth.auth_credential import AuthCredential
 from google.adk.auth.auth_credential import AuthCredentialTypes
 from google.adk.auth.auth_credential import OAuth2Auth
-from google.adk.auth.auth_preprocessor import TOOLSET_AUTH_CREDENTIAL_ID_PREFIX
 from google.adk.auth.auth_tool import AuthConfig
-from google.adk.auth.auth_tool import AuthToolArguments
 from google.adk.flows.llm_flows.base_llm_flow import _resolve_toolset_auth
-from google.adk.flows.llm_flows.base_llm_flow import BaseLlmFlow
-from google.adk.flows.llm_flows.base_llm_flow import TOOLSET_AUTH_CREDENTIAL_ID_PREFIX as FLOW_PREFIX
 from google.adk.flows.llm_flows.functions import build_auth_request_event
 from google.adk.flows.llm_flows.functions import REQUEST_EUC_FUNCTION_CALL_NAME
 from google.adk.tools.base_tool import BaseTool
@@ -85,15 +80,6 @@ def create_oauth2_auth_config() -> AuthConfig:
   )
 
 
-class TestToolsetAuthPrefixConstant:
-  """Test that prefix constants are consistent."""
-
-  def test_prefix_constants_match(self):
-    """Ensure auth_preprocessor and base_llm_flow use the same prefix."""
-    assert TOOLSET_AUTH_CREDENTIAL_ID_PREFIX == FLOW_PREFIX
-    assert TOOLSET_AUTH_CREDENTIAL_ID_PREFIX == "_adk_toolset_auth_"
-
-
 class TestResolveToolsetAuth:
   """Tests for _resolve_toolset_auth method in BaseLlmFlow."""
 
@@ -121,19 +107,12 @@ class TestResolveToolsetAuth:
     return agent
 
   @pytest.mark.asyncio
-  async def test_no_tools_returns_no_events(
-      self, mock_invocation_context, mock_agent
-  ):
-    """Test that no events are yielded when agent has no tools."""
+  async def test_no_tools_completes(self, mock_invocation_context, mock_agent):
+    """Test that resolve completes without side effects when agent has no tools."""
     mock_agent.tools = []
 
-    events = []
-    async for event in _resolve_toolset_auth(
-        mock_invocation_context, mock_agent
-    ):
-      events.append(event)
+    await _resolve_toolset_auth(mock_invocation_context, mock_agent)
 
-    assert len(events) == 0
     assert mock_invocation_context.end_invocation is False
 
   @pytest.mark.asyncio
@@ -144,13 +123,8 @@ class TestResolveToolsetAuth:
     toolset = MockToolset(auth_config=None)
     mock_agent.tools = [toolset]
 
-    events = []
-    async for event in _resolve_toolset_auth(
-        mock_invocation_context, mock_agent
-    ):
-      events.append(event)
+    await _resolve_toolset_auth(mock_invocation_context, mock_agent)
 
-    assert len(events) == 0
     assert mock_invocation_context.end_invocation is False
 
   @pytest.mark.asyncio
@@ -162,7 +136,6 @@ class TestResolveToolsetAuth:
     toolset = MockToolset(auth_config=auth_config)
     mock_agent.tools = [toolset]
 
-    # Mock CredentialManager to return a credential
     mock_credential = AuthCredential(
         auth_type=AuthCredentialTypes.OAUTH2,
         oauth2=OAuth2Auth(access_token="test-token"),
@@ -175,23 +148,21 @@ class TestResolveToolsetAuth:
       mock_manager.get_auth_credential = AsyncMock(return_value=mock_credential)
       MockCredentialManager.return_value = mock_manager
 
-      events = []
-      async for event in _resolve_toolset_auth(
-          mock_invocation_context, mock_agent
-      ):
-        events.append(event)
+      await _resolve_toolset_auth(mock_invocation_context, mock_agent)
 
-    # No auth request events - credential was available
-    assert len(events) == 0
     assert mock_invocation_context.end_invocation is False
-    # Credential should be populated in auth_config
     assert auth_config.exchanged_auth_credential == mock_credential
 
   @pytest.mark.asyncio
-  async def test_toolset_without_credential_yields_auth_event(
+  async def test_toolset_without_credential_defers_auth(
       self, mock_invocation_context, mock_agent
   ):
-    """Test that auth request event is yielded when credential not available."""
+    """Test that auth is deferred when credential is not available.
+
+    When no credential is found, _resolve_toolset_auth should not interrupt
+    the invocation. Auth will be handled on demand by ToolAuthHandler when
+    a tool is actually invoked.
+    """
     auth_config = create_oauth2_auth_config()
     toolset = MockToolset(auth_config=auth_config)
     mock_agent.tools = [toolset]
@@ -203,37 +174,16 @@ class TestResolveToolsetAuth:
       mock_manager.get_auth_credential = AsyncMock(return_value=None)
       MockCredentialManager.return_value = mock_manager
 
-      events = []
-      async for event in _resolve_toolset_auth(
-          mock_invocation_context, mock_agent
-      ):
-        events.append(event)
+      await _resolve_toolset_auth(mock_invocation_context, mock_agent)
 
-    # Should yield one auth request event
-    assert len(events) == 1
-    assert mock_invocation_context.end_invocation is True
-
-    # Check event structure
-    event = events[0]
-    assert event.invocation_id == "test-invocation-id"
-    assert event.author == "test-agent"
-    assert event.content is not None
-    assert len(event.content.parts) == 1
-
-    # Check function call
-    fc = event.content.parts[0].function_call
-    assert fc.name == REQUEST_EUC_FUNCTION_CALL_NAME
-    # The args use camelCase aliases from the pydantic model
-    assert fc.args["functionCallId"].startswith(
-        TOOLSET_AUTH_CREDENTIAL_ID_PREFIX
-    )
-    assert "MockToolset" in fc.args["functionCallId"]
+    assert mock_invocation_context.end_invocation is False
+    assert auth_config.exchanged_auth_credential is None
 
   @pytest.mark.asyncio
-  async def test_multiple_toolsets_needing_auth(
+  async def test_multiple_toolsets_without_credentials_defers_auth(
       self, mock_invocation_context, mock_agent
   ):
-    """Test that multiple toolsets needing auth yield multiple function calls."""
+    """Test that multiple toolsets without credentials do not interrupt."""
     auth_config1 = create_oauth2_auth_config()
     auth_config2 = create_oauth2_auth_config()
     toolset1 = MockToolset(auth_config=auth_config1)
@@ -247,17 +197,51 @@ class TestResolveToolsetAuth:
       mock_manager.get_auth_credential = AsyncMock(return_value=None)
       MockCredentialManager.return_value = mock_manager
 
-      events = []
-      async for event in _resolve_toolset_auth(
-          mock_invocation_context, mock_agent
-      ):
-        events.append(event)
+      await _resolve_toolset_auth(mock_invocation_context, mock_agent)
 
-    # Should yield one event with multiple function calls
-    # But since both toolsets have same class name, they'll have same ID
-    # and only one will be in pending_auth_requests (dict overwrites)
-    assert len(events) == 1
-    assert mock_invocation_context.end_invocation is True
+    assert mock_invocation_context.end_invocation is False
+
+  @pytest.mark.asyncio
+  async def test_mixed_toolsets_populates_available_credentials(
+      self, mock_invocation_context, mock_agent
+  ):
+    """Test that credentials are populated when available, without interrupt.
+
+    When one toolset has credentials and another does not, the available
+    credential should be populated while the missing one is deferred.
+    """
+    auth_config_with_cred = create_oauth2_auth_config()
+    auth_config_without_cred = create_oauth2_auth_config()
+    toolset_with_cred = MockToolset(auth_config=auth_config_with_cred)
+    toolset_without_cred = MockToolset(auth_config=auth_config_without_cred)
+    mock_agent.tools = [toolset_with_cred, toolset_without_cred]
+
+    mock_credential = AuthCredential(
+        auth_type=AuthCredentialTypes.OAUTH2,
+        oauth2=OAuth2Auth(access_token="test-token"),
+    )
+
+    call_count = 0
+
+    async def side_effect(*args, **kwargs):
+      nonlocal call_count
+      call_count += 1
+      if call_count == 1:
+        return mock_credential
+      return None
+
+    with patch(
+        "google.adk.flows.llm_flows.base_llm_flow.CredentialManager"
+    ) as MockCredentialManager:
+      mock_manager = AsyncMock()
+      mock_manager.get_auth_credential = AsyncMock(side_effect=side_effect)
+      MockCredentialManager.return_value = mock_manager
+
+      await _resolve_toolset_auth(mock_invocation_context, mock_agent)
+
+    assert mock_invocation_context.end_invocation is False
+    assert auth_config_with_cred.exchanged_auth_credential == mock_credential
+    assert auth_config_without_cred.exchanged_auth_credential is None
 
 
 class TestAuthPreprocessorToolsetAuthSkip:
