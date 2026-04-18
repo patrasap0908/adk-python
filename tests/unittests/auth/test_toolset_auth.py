@@ -244,29 +244,6 @@ class TestResolveToolsetAuth:
     assert auth_config_without_cred.exchanged_auth_credential is None
 
 
-class TestAuthPreprocessorToolsetAuthSkip:
-  """Tests for auth preprocessor skipping toolset auth."""
-
-  def test_toolset_auth_prefix_skipped(self):
-    """Test that function calls with toolset auth prefix are skipped."""
-    from google.adk.auth.auth_preprocessor import TOOLSET_AUTH_CREDENTIAL_ID_PREFIX
-
-    # Verify the prefix is correct
-    assert TOOLSET_AUTH_CREDENTIAL_ID_PREFIX == "_adk_toolset_auth_"
-
-    # Test that a function_call_id starting with this prefix would be skipped
-    toolset_function_call_id = f"{TOOLSET_AUTH_CREDENTIAL_ID_PREFIX}McpToolset"
-    assert toolset_function_call_id.startswith(
-        TOOLSET_AUTH_CREDENTIAL_ID_PREFIX
-    )
-
-    # Regular tool auth function_call_id should NOT start with prefix
-    regular_function_call_id = "call_123"
-    assert not regular_function_call_id.startswith(
-        TOOLSET_AUTH_CREDENTIAL_ID_PREFIX
-    )
-
-
 class TestCallbackContextGetAuthResponse:
   """Tests for CallbackContext.get_auth_response method."""
 

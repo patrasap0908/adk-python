@@ -31,11 +31,6 @@ from .auth_handler import AuthHandler
 from .auth_tool import AuthConfig
 from .auth_tool import AuthToolArguments
 
-# Prefix used by toolset auth credential IDs.
-# Auth requests with this prefix are for toolset authentication (before tool
-# listing) and don't require resuming a function call.
-TOOLSET_AUTH_CREDENTIAL_ID_PREFIX = '_adk_toolset_auth_'
-
 
 async def _store_auth_and_collect_resume_targets(
     events: list[Event],
@@ -50,7 +45,7 @@ async def _store_auth_and_collect_resume_targets(
   ``AuthToolArguments`` args, merges ``credential_key`` into the
   corresponding auth response, stores credentials via ``AuthHandler``,
   and returns the set of original function call IDs that should be
-  re-executed (excluding toolset auth).
+  re-executed.
 
   Args:
     events: Session events to scan.
@@ -96,8 +91,7 @@ async def _store_auth_and_collect_resume_targets(
         state=state
     )
 
-  # Step 3: Collect original function call IDs to resume, skipping
-  # toolset auth entries which don't map to a resumable function call.
+  # Step 3: Collect original function call IDs to resume.
   tools_to_resume: set[str] = set()
   for fc_id in auth_fc_ids:
     requested_auth_config = requested_auth_config_by_id.get(fc_id)
@@ -115,10 +109,6 @@ async def _store_auth_and_collect_resume_targets(
             and function_call.name == REQUEST_EUC_FUNCTION_CALL_NAME
         ):
           args = AuthToolArguments.model_validate(function_call.args)
-          if args.function_call_id.startswith(
-              TOOLSET_AUTH_CREDENTIAL_ID_PREFIX
-          ):
-            continue
           tools_to_resume.add(args.function_call_id)
 
   return tools_to_resume
